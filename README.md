@@ -15,7 +15,7 @@ A virtual host (vhost) scanner written in Go that scans IP addresses by sending 
 Install the vhost scanner directly from the repository using the Go tool:
 
 ```bash
-go install https://github.com/xhzeem/vhostscan@latest
+go install github.com/xhzeem/vhostscan@latest
 ```
 
 ## Usage
