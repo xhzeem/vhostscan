@@ -21,9 +21,10 @@ import (
 type Result struct {
 	IP         string            `json:"ip"`
 	Vhost      string            `json:"vhost"`
-	Status     int               `json:"status"`
-	Length     int               `json:"length"`
 	Protocol   string            `json:"protocol"`
+	Status     int               `json:"status"`
+	BaseStatus int               `json:"base_status"`
+	Length     int               `json:"length"`
 	LengthDiff int               `json:"length_diff"`
 	Headers    map[string]string `json:"headers,omitempty"`
 	Body       string            `json:"body,omitempty"`
@@ -135,7 +136,7 @@ func main() {
 	outputFile := flag.String("output", "output.json", "Output file in JSON format")
 	threads := flag.Int("threads", 10, "Number of concurrent threads")
 	timeout := flag.Int("timeout", 10, "HTTP request timeout in seconds")
-	contentLengthDiff := flag.Int("content-diff", 100, "Content length difference threshold")
+	contentLengthDiff := flag.Int("length-diff", 100, "Content length difference threshold")
 	verbose := flag.Bool("verbose", false, "Enable verbose output")
 	includeHeaders := flag.Bool("include-headers", false, "Include response headers in the output")
 	includeBody := flag.Bool("include-body", false, "Include response body in the output")
@@ -296,9 +297,10 @@ func main() {
 					result := &Result{
 						IP:         ip,
 						Vhost:      vhost,
-						Status:     status,
-						Length:     length,
 						Protocol:   protocol,
+						Status:     status,
+						BaseStatus: baseStatus,
+						Length:     length,
 						LengthDiff: lengthDiffValue,
 					}
 
