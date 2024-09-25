@@ -21,10 +21,8 @@ The VHost Scanner operates by comparing server responses to distinguish valid vi
 Install the VHost Scanner using the Go tool:
 
 ```bash
-go install github.com/yourusername/vhostscan@latest
+go install github.com/xhzeem/vhostscan@latest
 ```
-
-Replace `yourusername` with your actual GitHub username if the repository is hosted under your account.
 
 ## Usage
 
