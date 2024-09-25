@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"crypto/tls"
-	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -26,7 +25,6 @@ const (
 	ColorYellow = "\033[33m"
 	ColorBlue   = "\033[34m"
 	ColorCyan   = "\033[36m"
-	ColorWhite  = "\033[37m"
 )
 
 // Result struct for storing the findings
@@ -37,15 +35,16 @@ type Result struct {
 	Status     int               `json:"status"`
 	BaseStatus int               `json:"base_status"`
 	Length     int               `json:"content_length"`
-	LengthDiff int               `json:"length_diff"`
 	Location   string            `json:"location,omitempty"`
 	Headers    map[string]string `json:"headers,omitempty"`
 	Body       string            `json:"body,omitempty"`
 	Curl       string            `json:"curl"`
 }
 
-type VhostResult struct {
-	Result                 *Result
+type ResponseData struct {
+	Status                 int
+	ContentType            string
+	AdjustedBodyLength     int
 	AdjustedLocationLength int
 }
 
@@ -75,14 +74,7 @@ func randomString(n int) string {
 	return string(s)
 }
 
-func abs(a int) int {
-	if a < 0 {
-		return -a
-	}
-	return a
-}
-
-func sendRequest(ip, host, protocol string, baseClient *http.Client, maxBodySize int64) (int, http.Header, []byte, error) {
+func sendRequest(ip, host, protocol string, client *http.Client, maxBodySize int64) (int, http.Header, []byte, error) {
 	urlStr := fmt.Sprintf("%s://%s", protocol, ip)
 	req, err := http.NewRequest("GET", urlStr, nil)
 	if err != nil {
@@ -90,25 +82,12 @@ func sendRequest(ip, host, protocol string, baseClient *http.Client, maxBodySize
 	}
 	req.Host = host
 
-	// Clone the base transport to modify TLS settings per request
-	baseTransport := baseClient.Transport.(*http.Transport)
-	transport := baseTransport.Clone()
-
-	// Create a new client with the modified transport
-	client := &http.Client{
-		Timeout:   baseClient.Timeout,
-		Transport: transport,
-		// Do not follow redirects
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, nil, nil, err
 	}
 	defer resp.Body.Close()
+
 	var body []byte
 	if maxBodySize > 0 {
 		body, err = io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
@@ -150,18 +129,23 @@ func parseIgnoredStatusCodes(s string) map[int]struct{} {
 	return ignoredCodes
 }
 
-func generateCurlCommand(ip, host, protocol string) string {
-	return fmt.Sprintf("curl -k -H 'Host: %s' '%s://%s'", host, protocol, ip)
+// compareResponses compares two responses and returns true if they are considered the same
+func compareResponses(resp1, resp2 ResponseData) bool {
+	sameStatus := resp1.Status == resp2.Status
+	sameContentType := resp1.ContentType == resp2.ContentType
+	sameBodyLength := resp1.AdjustedBodyLength == resp2.AdjustedBodyLength
+	sameLocationLength := resp1.AdjustedLocationLength == resp2.AdjustedLocationLength
+
+	return sameStatus && sameContentType && sameBodyLength && sameLocationLength
 }
 
 func main() {
 	// Parse command-line arguments
 	ipsFile := flag.String("ips", "ips.txt", "File containing list of IPs")
 	vhostsFile := flag.String("vhosts", "vhosts.txt", "File containing list of vhosts")
-	outputFile := flag.String("output", "/tmp/vhostscan-"+time.Now().Format("2006-01-02_15-04-05")+".json", "Output file in JSON format")
+	outputFile := flag.String("output", "vhostscan-"+time.Now().Format("2006-01-02_15-04-05")+".json", "Output file in JSON format")
 	threads := flag.Int("threads", 10, "Number of concurrent threads")
 	timeout := flag.Int("timeout", 10, "HTTP request timeout in seconds")
-	contentLengthDiff := flag.Int("length-diff", 100, "Content length difference threshold")
 	verbose := flag.Bool("verbose", false, "Enable verbose output")
 	includeHeaders := flag.Bool("include-headers", false, "Include response headers in the output")
 	includeBody := flag.Bool("include-body", false, "Include response body in the output")
@@ -245,6 +229,10 @@ func main() {
 	baseClient := &http.Client{
 		Timeout:   time.Duration(*timeout) * time.Second,
 		Transport: transport,
+		// Do not follow redirects
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
 
 	// Create output file
@@ -281,7 +269,7 @@ func main() {
 		defer writeWg.Done()
 		firstResult := true
 		for result := range resultsChan {
-			result.Curl = generateCurlCommand(result.IP, result.Vhost, result.Protocol)
+			result.Curl = fmt.Sprintf("curl -i -k -H 'Host: %s' '%s://%s'", result.Vhost, result.Protocol, result.IP)
 			resultJSON, err := json.Marshal(result)
 			if err != nil {
 				if *verbose {
@@ -300,7 +288,7 @@ func main() {
 
 			// Output to stdout as formatted text
 			fmt.Printf("%s[+] Found Vhost:%s %s%s%s on IP %s%s%s (%s%s%s)\n", green, reset, cyan, result.Vhost, reset, yellow, result.IP, reset, blue, result.Protocol, reset)
-			fmt.Printf("    Status: %d, Base Status: %d, Length Diff: %d\n", result.Status, result.BaseStatus, result.LengthDiff)
+			fmt.Printf("    Status: %d, Base Status: %d\n", result.Status, result.BaseStatus)
 			if result.Location != "" {
 				fmt.Printf("    Location: %s\n", result.Location)
 			}
@@ -323,35 +311,49 @@ func main() {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			protocols := []string{"http", "https"}
+			protocols := []string{"https", "http"}
 			for _, protocol := range protocols {
 				if *verbose {
-					fmt.Printf("%s[*] Testing IP %s over %s%s\n", blue, ip, protocol, reset)
+					fmt.Printf("%s[*] Testing IP %s over %s%s\n", yellow, ip, protocol, reset)
 				}
 
 				// Send initial random host request
 				firstRandomHost := randomString(16) + ".com"
-				baseStatus, baseHeaders, baseBody, err := sendRequest(ip, firstRandomHost, protocol, baseClient, *maxBodySize)
+				baseStatus, baseHeaders, baseBodyBytes, err := sendRequest(ip, firstRandomHost, protocol, baseClient, *maxBodySize)
 				if err != nil {
 					if *verbose {
 						fmt.Printf("%s[!] Error with first random host request to %s (%s): %v%s\n", red, ip, protocol, err, reset)
 					}
 					continue
 				}
-				baseLength := len(baseBody)
 
-				// Get adjusted Location header length for the initial request
-				baseLocationHeader := baseHeaders.Get("Location")
+				baseContentType := baseHeaders.Get("Content-Type")
+				adjustedBaseBody := strings.ReplaceAll(string(baseBodyBytes), firstRandomHost, "")
+				adjustedBaseBodyLength := len(adjustedBaseBody)
+
 				var adjustedBaseLocationLength int
-				if baseLocationHeader != "" {
-					adjustedBaseLocation := strings.Replace(baseLocationHeader, firstRandomHost, "", -1)
+				if baseLocationHeader := baseHeaders.Get("Location"); baseLocationHeader != "" {
+					adjustedBaseLocation := strings.ReplaceAll(baseLocationHeader, firstRandomHost, "")
 					adjustedBaseLocationLength = len(adjustedBaseLocation)
 				} else {
 					adjustedBaseLocationLength = -1
 				}
 
-				// Store vhost responses
-				vhostResults := []*VhostResult{}
+				baseResponse := ResponseData{
+					Status:                 baseStatus,
+					ContentType:            baseContentType,
+					AdjustedBodyLength:     adjustedBaseBodyLength,
+					AdjustedLocationLength: adjustedBaseLocationLength,
+				}
+
+				// Now test vhosts
+				type StoredVhostResponse struct {
+					Vhost     string
+					Response  ResponseData
+					Headers   http.Header
+					BodyBytes []byte
+				}
+				storedVhostResponses := []StoredVhostResponse{}
 
 				for _, vhost := range vhosts {
 					// Delay between requests
@@ -359,8 +361,12 @@ func main() {
 						time.Sleep(time.Duration(*delay) * time.Millisecond)
 					}
 
+					if *verbose {
+						fmt.Printf("%s[*] Testing %s on %s://%s%s\n", blue, vhost, protocol, ip, reset)
+					}
+
 					// Send request with actual vhost
-					status, headers, body, err := sendRequest(ip, vhost, protocol, baseClient, *maxBodySize)
+					status, headers, bodyBytes, err := sendRequest(ip, vhost, protocol, baseClient, *maxBodySize)
 					if err != nil {
 						if *verbose {
 							fmt.Printf("%s[!] Error with vhost %s request to %s (%s): %v%s\n", red, vhost, ip, protocol, err, reset)
@@ -376,80 +382,99 @@ func main() {
 						continue
 					}
 
-					length := len(body)
+					// Adjust the body by removing the vhost and get its length
+					body := string(bodyBytes)
+					adjustedBody := strings.ReplaceAll(body, vhost, "")
+					adjustedBodyLength := len(adjustedBody)
 
-					// Get adjusted Location header length for the vhost request
+					// Get adjusted Location header and its length
 					locationHeader := headers.Get("Location")
 					var adjustedLocationLength int
 					if locationHeader != "" {
-						adjustedLocation := strings.Replace(locationHeader, vhost, "", -1)
+						adjustedLocation := strings.ReplaceAll(locationHeader, vhost, "")
 						adjustedLocationLength = len(adjustedLocation)
 					} else {
 						adjustedLocationLength = -1
 					}
 
-					// Compare with the initial random request
-					if status != baseStatus || abs(length-baseLength) >= *contentLengthDiff || adjustedLocationLength != adjustedBaseLocationLength {
-						result := &Result{
-							IP:         ip,
-							Vhost:      vhost,
-							Protocol:   protocol,
-							Status:     status,
-							BaseStatus: baseStatus,
-							Length:     length,
-							LengthDiff: length - baseLength,
-							Location:   locationHeader,
-						}
+					contentType := headers.Get("Content-Type")
 
-						if *includeHeaders {
-							result.Headers = flattenHeaders(headers)
-						}
+					vhostResponse := ResponseData{
+						Status:                 status,
+						ContentType:            contentType,
+						AdjustedBodyLength:     adjustedBodyLength,
+						AdjustedLocationLength: adjustedLocationLength,
+					}
 
-						if *includeBody {
-							result.Body = base64.StdEncoding.EncodeToString(body)
-						}
-
-						// Append to vhostResults
-						vhostResults = append(vhostResults, &VhostResult{
-							Result:                 result,
-							AdjustedLocationLength: adjustedLocationLength,
+					// Compare with the initial base response
+					if compareResponses(vhostResponse, baseResponse) {
+						// Responses are the same; skip this vhost
+						continue
+					} else {
+						// Responses are different; store for comparison with final base response
+						storedVhostResponses = append(storedVhostResponses, StoredVhostResponse{
+							Vhost:     vhost,
+							Response:  vhostResponse,
+							Headers:   headers,
+							BodyBytes: bodyBytes,
 						})
 					}
 				}
 
-				// Send final random host request
+				// Send second random host request after vhost requests
 				finalRandomHost := randomString(16) + ".com"
-				finalBaseStatus, finalBaseHeaders, finalBaseBody, err := sendRequest(ip, finalRandomHost, protocol, baseClient, *maxBodySize)
+				finalBaseStatus, finalBaseHeaders, finalBaseBodyBytes, err := sendRequest(ip, finalRandomHost, protocol, baseClient, *maxBodySize)
 				if err != nil {
 					if *verbose {
-						fmt.Printf("%s[!] Error with final random host request to %s (%s): %v%s\n", red, ip, protocol, err, reset)
+						fmt.Printf("%s[!] Error with second random host request to %s (%s): %v%s\n", red, ip, protocol, err, reset)
 					}
 					continue
 				}
-				finalBaseLength := len(finalBaseBody)
 
-				// Get adjusted Location header length for the final request
-				finalBaseLocationHeader := finalBaseHeaders.Get("Location")
+				finalBaseContentType := finalBaseHeaders.Get("Content-Type")
+				adjustedFinalBaseBody := strings.ReplaceAll(string(finalBaseBodyBytes), finalRandomHost, "")
+				adjustedFinalBaseBodyLength := len(adjustedFinalBaseBody)
+
 				var adjustedFinalBaseLocationLength int
-				if finalBaseLocationHeader != "" {
-					adjustedFinalBaseLocation := strings.Replace(finalBaseLocationHeader, finalRandomHost, "", -1)
+				if finalBaseLocationHeader := finalBaseHeaders.Get("Location"); finalBaseLocationHeader != "" {
+					adjustedFinalBaseLocation := strings.ReplaceAll(finalBaseLocationHeader, finalRandomHost, "")
 					adjustedFinalBaseLocationLength = len(adjustedFinalBaseLocation)
 				} else {
 					adjustedFinalBaseLocationLength = -1
 				}
 
-				// Now validate all vhost results against both random host requests
-				for _, vhostResult := range vhostResults {
-					result := vhostResult.Result
-					adjustedLocationLength := vhostResult.AdjustedLocationLength
+				finalBaseResponse := ResponseData{
+					Status:                 finalBaseStatus,
+					ContentType:            finalBaseContentType,
+					AdjustedBodyLength:     adjustedFinalBaseBodyLength,
+					AdjustedLocationLength: adjustedFinalBaseLocationLength,
+				}
 
-					statusDiff := result.Status != baseStatus && result.Status != finalBaseStatus
-					lengthDiff := abs(result.Length-baseLength) >= *contentLengthDiff && abs(result.Length-finalBaseLength) >= *contentLengthDiff
+				// Now validate stored vhost responses against final base response
+				for _, svr := range storedVhostResponses {
+					if compareResponses(svr.Response, finalBaseResponse) {
+						// Vhost response matches final base response; discard
+						continue
+					} else {
+						// Vhost response is different from both base responses; report it
+						result := &Result{
+							IP:         ip,
+							Vhost:      svr.Vhost,
+							Protocol:   protocol,
+							Status:     svr.Response.Status,
+							BaseStatus: baseStatus,
+							Length:     len(svr.BodyBytes),
+							Location:   svr.Headers.Get("Location"),
+						}
 
-					// Compare adjusted Location header lengths
-					locationLengthDiff := adjustedLocationLength != adjustedBaseLocationLength && adjustedLocationLength != adjustedFinalBaseLocationLength
+						if *includeHeaders {
+							result.Headers = flattenHeaders(svr.Headers)
+						}
 
-					if statusDiff || lengthDiff || locationLengthDiff {
+						if *includeBody {
+							result.Body = string(svr.BodyBytes)
+						}
+
 						// Check if this vhost and IP combination has already been reported
 						key := result.IP + "|" + result.Vhost
 						reportedMutex.Lock()
