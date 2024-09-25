@@ -166,7 +166,7 @@ func main() {
 	includeHeaders := flag.Bool("include-headers", false, "Include response headers in the output")
 	includeBody := flag.Bool("include-body", false, "Include response body in the output")
 	maxBodySize := flag.Int64("max-body-size", 1024*1024, "Maximum size of response body to include (in bytes), 0 for unlimited")
-	ignoreStatusCodesStr := flag.String("ignore-status", "429,500,501,502,503,504,530", "Comma-separated list of status codes to ignore")
+	ignoreStatusCodesStr := flag.String("ignore-status", "403,429,500,501,502,503,504,530", "Comma-separated list of status codes to ignore")
 	proxy := flag.String("proxy", "", "Proxy URL (e.g., http://proxy:port)")
 	delay := flag.Int("delay", 0, "Delay between requests in milliseconds")
 	noColor := flag.Bool("no-color", false, "Disable color output")
